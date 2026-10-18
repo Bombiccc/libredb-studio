@@ -9,6 +9,26 @@ import { CreateTableModal } from "@/components/CreateTableModal";
 import type { DatabaseType } from "@/lib/types";
 import type { ProviderCapabilities } from "@/lib/db/types";
 
+/**
+ * The fields of each engine's capabilities that the form reads: how it quotes, and the identifier
+ * limit PostgreSQL truncates at. The values are the providers' own declarations.
+ */
+const CAPS: Partial<Record<DatabaseType, ProviderCapabilities>> = {
+  postgres: { queryLanguage: "sql", defaultPort: 5432, maxIdentifierBytes: 63 },
+  mysql: { queryLanguage: "sql", defaultPort: 3306 },
+  mssql: { queryLanguage: "sql", defaultPort: 1433 },
+  oracle: { queryLanguage: "sql", defaultPort: 1521 },
+  sqlite: { queryLanguage: "sql", defaultPort: null },
+  libsql: { queryLanguage: "sql", defaultPort: 8080 },
+  duckdb: { queryLanguage: "sql", defaultPort: null, identifierQuoting: "double" },
+  trino: { queryLanguage: "sql", defaultPort: 8080, identifierQuoting: "double" },
+} as unknown as Partial<Record<DatabaseType, ProviderCapabilities>>;
+
+/** The modal as the app mounts it: with the connection's capabilities, unless a test names its own. */
+function Modal(props: React.ComponentProps<typeof CreateTableModal>) {
+  return <CreateTableModal capabilities={CAPS[props.dbType ?? "postgres"]} {...props} />;
+}
+
 describe("CreateTableModal", () => {
   afterEach(() => {
     cleanup();
@@ -18,9 +38,7 @@ describe("CreateTableModal", () => {
   });
 
   test("renders dialog content when isOpen", () => {
-    const { baseElement } = render(
-      <CreateTableModal isOpen onClose={mock(() => {})} onTableCreated={mock(() => {})} />,
-    );
+    const { baseElement } = render(<Modal isOpen onClose={mock(() => {})} onTableCreated={mock(() => {})} />);
     const body = within(baseElement);
     expect(body.queryByText("Create New Table")).not.toBeNull();
     expect(body.queryByText("SQL Preview")).not.toBeNull();
@@ -30,9 +48,7 @@ describe("CreateTableModal", () => {
   });
 
   test("shows default id column and SQL placeholder", () => {
-    const { baseElement } = render(
-      <CreateTableModal isOpen onClose={mock(() => {})} onTableCreated={mock(() => {})} />,
-    );
+    const { baseElement } = render(<Modal isOpen onClose={mock(() => {})} onTableCreated={mock(() => {})} />);
     expect(baseElement.textContent).toContain("-- Name your table to see SQL");
     expect(baseElement.textContent).toContain("Auto-Increment");
   });
@@ -40,9 +56,7 @@ describe("CreateTableModal", () => {
   // ── 1. Add Column button adds new row ──────────────────────────────────────
 
   test("Add Column button adds a new column row", () => {
-    const { baseElement } = render(
-      <CreateTableModal isOpen onClose={mock(() => {})} onTableCreated={mock(() => {})} />,
-    );
+    const { baseElement } = render(<Modal isOpen onClose={mock(() => {})} onTableCreated={mock(() => {})} />);
     const body = within(baseElement);
 
     // Initially there is 1 column (the default "id" column)
@@ -63,9 +77,7 @@ describe("CreateTableModal", () => {
   // ── 2. Remove column removes a row ─────────────────────────────────────────
 
   test("remove button removes a column row", () => {
-    const { baseElement } = render(
-      <CreateTableModal isOpen onClose={mock(() => {})} onTableCreated={mock(() => {})} />,
-    );
+    const { baseElement } = render(<Modal isOpen onClose={mock(() => {})} onTableCreated={mock(() => {})} />);
     const body = within(baseElement);
 
     // Add a second column first
@@ -87,9 +99,7 @@ describe("CreateTableModal", () => {
   // ── 3. Cannot remove last remaining column ─────────────────────────────────
 
   test("cannot remove the last remaining column", () => {
-    const { baseElement } = render(
-      <CreateTableModal isOpen onClose={mock(() => {})} onTableCreated={mock(() => {})} />,
-    );
+    const { baseElement } = render(<Modal isOpen onClose={mock(() => {})} onTableCreated={mock(() => {})} />);
 
     // Only 1 column (id) exists
     expect(baseElement.querySelectorAll('input[placeholder="column_name"]').length).toBe(1);
@@ -112,12 +122,24 @@ describe("CreateTableModal", () => {
     expect(baseElement.querySelectorAll('input[placeholder="column_name"]').length).toBe(1);
   });
 
-  // ── 4. Names are preserved and quoted in generated SQL (#1435) ────────────
+  // ── 4. Names are kept as typed (#1435) ────────────────────────────────────
 
-  test("table name input preserves case and special characters", () => {
+  /** Render for one engine, type a table name and the first column's name, return the preview and the page. */
+  function typeNames(dbType: DatabaseType, table: string, column: string, onTableCreated = mock((_sql: string) => {})) {
     const { baseElement } = render(
-      <CreateTableModal isOpen onClose={mock(() => {})} onTableCreated={mock(() => {})} />,
+      <Modal isOpen dbType={dbType} onClose={mock(() => {})} onTableCreated={onTableCreated} />,
     );
+    act(() => {
+      fireEvent.change(baseElement.querySelector("#tableName") as HTMLInputElement, { target: { value: table } });
+      fireEvent.change(baseElement.querySelector('input[placeholder="column_name"]') as HTMLInputElement, {
+        target: { value: column },
+      });
+    });
+    return { baseElement, sql: (baseElement.querySelector("pre") as HTMLElement).textContent || "" };
+  }
+
+  test("table name input keeps case and special characters as typed", () => {
+    const { baseElement } = render(<Modal isOpen onClose={mock(() => {})} onTableCreated={mock(() => {})} />);
 
     const tableNameInput = baseElement.querySelector("#tableName") as HTMLInputElement;
     expect(tableNameInput).not.toBeNull();
@@ -126,143 +148,89 @@ describe("CreateTableModal", () => {
       fireEvent.change(tableNameInput, { target: { value: "My Table-Name!123" } });
     });
 
+    // It used to be rewritten to `my_table_name_123`, a different identifier (#1435).
     expect(tableNameInput.value).toBe("My Table-Name!123");
   });
 
-  for (const { dbType, quote } of [
-    { dbType: "postgres", quote: '"' },
-    { dbType: "mysql", quote: "`" },
-  ] as const) {
-    test(`${dbType} keeps Unicode table and column names in the preview and submitted SQL`, () => {
+  for (const [dbType, table, column] of [
+    ["postgres", '"Ürün Tablo"', '"başlık"'],
+    ["mysql", "`Ürün Tablo`", "`başlık`"],
+    ["mssql", "[Ürün Tablo]", "[başlık]"],
+    ["oracle", '"Ürün Tablo"', '"başlık"'],
+  ] as Array<[DatabaseType, string, string]>) {
+    test(`${dbType}: a name outside the bare ASCII subset is quoted exactly, in the preview and the submitted SQL`, () => {
       const onTableCreated = mock((_sql: string) => {});
-      const { baseElement } = render(
-        <CreateTableModal isOpen dbType={dbType} onClose={mock(() => {})} onTableCreated={onTableCreated} />,
-      );
-
-      const tableNameInput = baseElement.querySelector("#tableName") as HTMLInputElement;
-      act(() => {
-        fireEvent.change(tableNameInput, { target: { value: "Ürün Tablo" } });
-      });
-      act(() => {
-        fireEvent.click(within(baseElement).getByText("Add Column"));
-      });
-      const columnInput = baseElement.querySelectorAll<HTMLInputElement>('input[placeholder="column_name"]')[1];
-      act(() => {
-        fireEvent.change(columnInput, { target: { value: "başlık" } });
-      });
-
-      expect(tableNameInput.value).toBe("Ürün Tablo");
-      expect(columnInput.value).toBe("başlık");
-      const preview = (baseElement.querySelector("pre") as HTMLElement).textContent || "";
-      expect(preview).toContain(`CREATE TABLE ${quote}Ürün Tablo${quote} (`);
-      expect(preview).toContain(`${quote}başlık${quote} VARCHAR(255)`);
-
+      const { baseElement, sql } = typeNames(dbType, "Ürün Tablo", "başlık", onTableCreated);
+      expect(sql).toContain(`CREATE TABLE ${table} (\n  ${column} `);
       act(() => {
         fireEvent.click(within(baseElement).getByText("CREATE TABLE"));
       });
       expect(onTableCreated).toHaveBeenCalledTimes(1);
-      expect(onTableCreated.mock.calls[0][0]).toBe(preview);
+      expect(onTableCreated.mock.calls[0][0]).toBe(sql);
     });
   }
 
-  for (const { dbType, name, column, quotedName, quotedColumn } of [
-    { dbType: "postgres", name: 'A"B', column: 'C"D', quotedName: '"A""B"', quotedColumn: '"C""D"' },
-    { dbType: "mysql", name: "A`B", column: "C`D", quotedName: "`A``B`", quotedColumn: "`C``D`" },
-    { dbType: "mssql", name: "A]B", column: "C]D", quotedName: "[A]]B]", quotedColumn: "[C]]D]" },
-    { dbType: "sqlite", name: 'A"B', column: 'C"D', quotedName: '"A""B"', quotedColumn: '"C""D"' },
-    { dbType: "libsql", name: 'A"B', column: 'C"D', quotedName: '"A""B"', quotedColumn: '"C""D"' },
-    { dbType: "duckdb", name: 'A"B', column: 'C"D', quotedName: '"A""B"', quotedColumn: '"C""D"' },
-    { dbType: "trino", name: 'A"B', column: 'C"D', quotedName: '"A""B"', quotedColumn: '"C""D"' },
-  ] as const) {
-    test(`${dbType} escapes quote characters in table and auto-increment column names`, () => {
-      const { baseElement } = render(
-        <CreateTableModal isOpen dbType={dbType} onClose={mock(() => {})} onTableCreated={mock(() => {})} />,
-      );
-      act(() => {
-        fireEvent.change(baseElement.querySelector("#tableName") as HTMLInputElement, { target: { value: name } });
-        fireEvent.change(baseElement.querySelector('input[placeholder="column_name"]') as HTMLInputElement, {
-          target: { value: column },
-        });
-      });
-      const preview = baseElement.querySelector("pre")?.textContent || "";
-      expect(preview).toContain(`CREATE TABLE ${quotedName} (`);
-      expect(preview).toContain(`${quotedColumn} `);
+  for (const [dbType, name, quoted] of [
+    ["postgres", 'A"B', '"A""B"'],
+    ["mysql", "A`B", "`A``B`"],
+    ["mssql", "A]B", "[A]]B]"],
+    ["sqlite", 'A"B', '"A""B"'],
+    ["trino", 'A"B', '"A""B"'],
+  ] as Array<[DatabaseType, string, string]>) {
+    test(`${dbType}: a quote character inside a typed name is escaped`, () => {
+      const { sql } = typeNames(dbType, name, name);
+      expect(sql).toContain(`CREATE TABLE ${quoted} (\n  ${quoted} `);
     });
   }
 
-  test("quoted ASCII names also permit reserved words", () => {
-    const { baseElement } = render(
-      <CreateTableModal isOpen dbType="postgres" onClose={mock(() => {})} onTableCreated={mock(() => {})} />,
-    );
-    act(() => {
-      fireEvent.change(baseElement.querySelector("#tableName") as HTMLInputElement, { target: { value: "select" } });
-      fireEvent.change(baseElement.querySelector('input[placeholder="column_name"]') as HTMLInputElement, {
-        target: { value: "order" },
-      });
-    });
-    const preview = baseElement.querySelector("pre")?.textContent || "";
-    expect(preview).toContain('CREATE TABLE "select" (');
-    expect(preview).toContain('"order" INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY');
+  test("a regular ASCII name is written bare, so the engine reads it as the editor would", () => {
+    // Mixed case folds the way the same text typed in the editor folds, and a reserved word
+    // reaches the engine bare and is refused there, as it would be from the editor.
+    expect(typeNames("postgres", "MyTable", "Order_Id").sql).toContain("CREATE TABLE MyTable (\n  Order_Id ");
+    cleanup();
+    expect(typeNames("postgres", "select", "id").sql).toContain("CREATE TABLE select (");
   });
 
-  for (const { dbType, name, error } of [
-    { dbType: "postgres", name: "ü".repeat(32), error: "63 bytes" },
-    { dbType: "mysql", name: "a".repeat(65), error: "64 characters" },
-    { dbType: "mysql", name: "name ", error: "end with a space" },
-    { dbType: "mysql", name: "name😀", error: "supplementary" },
-    { dbType: "mssql", name: "a".repeat(129), error: "128 characters" },
-    { dbType: "oracle", name: "a".repeat(129), error: "128 bytes" },
-    { dbType: "oracle", name: 'A"B', error: "double quote" },
-    { dbType: "postgres", name: "a\0b", error: "null character" },
-  ] as const) {
-    test(`${dbType} reports unsupported table name under its field and blocks creation: ${error}`, () => {
-      const onTableCreated = mock((_sql: string) => {});
-      const { baseElement } = render(
-        <CreateTableModal isOpen dbType={dbType} onClose={mock(() => {})} onTableCreated={onTableCreated} />,
-      );
-      const input = baseElement.querySelector("#tableName") as HTMLInputElement;
-      act(() => {
-        fireEvent.change(input, { target: { value: name } });
-      });
-      expect(input.value).toBe(name);
-      expect(baseElement.querySelector("#tableName-error")?.textContent).toContain(error);
-      act(() => {
-        fireEvent.click(within(baseElement).getByText("CREATE TABLE"));
-      });
-      expect(onTableCreated).not.toHaveBeenCalled();
+  test("a name past the engine's identifier limit is refused under its field, not shortened by the engine", () => {
+    // 64 UTF-8 bytes in 32 characters: PostgreSQL would keep the first 63 and say so only in a NOTICE.
+    const long = "ü".repeat(32);
+    const onTableCreated = mock((_sql: string) => {});
+    const { baseElement, sql } = typeNames("postgres", long, "id", onTableCreated);
+    expect((baseElement.querySelector("#tableName") as HTMLInputElement).value).toBe(long);
+    expect(baseElement.querySelector("#tableName-error")?.textContent).toBe("Table name must be at most 63 bytes");
+    expect(baseElement.querySelector("#tableName")?.getAttribute("aria-invalid")).toBe("true");
+    expect(sql).toBe("-- Correct the names to see SQL");
+    act(() => {
+      fireEvent.click(within(baseElement).getByText("CREATE TABLE"));
     });
-  }
+    expect(mockToastError).toHaveBeenCalledWith("Table name must be at most 63 bytes");
+    expect(onTableCreated).not.toHaveBeenCalled();
+  });
 
-  for (const { dbType, name, error } of [
-    { dbType: "oracle", name: 'A"B', error: "double quote" },
-    { dbType: "oracle", name: "ROWID", error: "ROWID" },
-    { dbType: "mysql", name: "başlık ", error: "end with a space" },
-  ] as const) {
-    test(`${dbType} reports unsupported column name under that column and blocks creation: ${error}`, () => {
-      const onTableCreated = mock((_sql: string) => {});
-      const { baseElement } = render(
-        <CreateTableModal isOpen dbType={dbType} onClose={mock(() => {})} onTableCreated={onTableCreated} />,
-      );
-      act(() => {
-        fireEvent.change(baseElement.querySelector("#tableName") as HTMLInputElement, { target: { value: "orders" } });
-        fireEvent.change(baseElement.querySelector('input[placeholder="column_name"]') as HTMLInputElement, {
-          target: { value: name },
-        });
-      });
-      expect(baseElement.querySelector("#columnName-error-0")?.textContent).toContain(error);
-      act(() => {
-        fireEvent.click(within(baseElement).getByText("CREATE TABLE"));
-      });
-      expect(onTableCreated).not.toHaveBeenCalled();
+  test("a column name past the limit is refused under that column", () => {
+    const onTableCreated = mock((_sql: string) => {});
+    const { baseElement } = typeNames("postgres", "orders", "ü".repeat(32), onTableCreated);
+    expect(baseElement.querySelector("#columnName-error-0")?.textContent).toBe("Column name must be at most 63 bytes");
+    expect(baseElement.querySelector("#tableName-error")).toBeNull();
+    act(() => {
+      fireEvent.click(within(baseElement).getByText("CREATE TABLE"));
     });
-  }
+    expect(mockToastError).toHaveBeenCalledWith("Column name must be at most 63 bytes");
+    expect(onTableCreated).not.toHaveBeenCalled();
+  });
+
+  test("a name at the limit, or on an engine that declares none, is accepted", () => {
+    // 63 bytes exactly.
+    expect(typeNames("postgres", `${"ü".repeat(31)}a`, "id").sql).toContain(`CREATE TABLE "${"ü".repeat(31)}a" (`);
+    cleanup();
+    // MySQL declares no client-side limit: what it refuses, it refuses with an error of its own.
+    expect(typeNames("mysql", "ü".repeat(40), "id").sql).toContain(`CREATE TABLE \`${"ü".repeat(40)}\` (`);
+  });
 
   // ── 5. SQL preview with column definitions ─────────────────────────────────
 
   test("SQL preview shows CREATE TABLE with column definitions", () => {
-    const { baseElement } = render(
-      <CreateTableModal isOpen onClose={mock(() => {})} onTableCreated={mock(() => {})} />,
-    );
+    const { baseElement } = render(<Modal isOpen onClose={mock(() => {})} onTableCreated={mock(() => {})} />);
 
     // Set table name to trigger SQL generation
     const tableNameInput = baseElement.querySelector("#tableName") as HTMLInputElement;
@@ -271,16 +239,14 @@ describe("CreateTableModal", () => {
     });
 
     const text = baseElement.textContent || "";
-    expect(text).toContain('CREATE TABLE "users"');
-    expect(text).toContain('"id" INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY');
+    expect(text).toContain("CREATE TABLE users");
+    expect(text).toContain("id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY");
   });
 
   // ── 6. NOT NULL in SQL for non-nullable columns ────────────────────────────
 
   test("NOT NULL appears in SQL for non-nullable non-PK column", () => {
-    const { baseElement } = render(
-      <CreateTableModal isOpen onClose={mock(() => {})} onTableCreated={mock(() => {})} />,
-    );
+    const { baseElement } = render(<Modal isOpen onClose={mock(() => {})} onTableCreated={mock(() => {})} />);
     const body = within(baseElement);
 
     // Set table name
@@ -319,15 +285,13 @@ describe("CreateTableModal", () => {
 
     // SQL should now contain NOT NULL for the status column
     const text = baseElement.textContent || "";
-    expect(text).toContain('"status" VARCHAR(255) NOT NULL');
+    expect(text).toContain("status VARCHAR(255) NOT NULL");
   });
 
   // ── 7. UNIQUE in SQL for unique columns ────────────────────────────────────
 
   test("UNIQUE appears in SQL for unique non-PK column", () => {
-    const { baseElement } = render(
-      <CreateTableModal isOpen onClose={mock(() => {})} onTableCreated={mock(() => {})} />,
-    );
+    const { baseElement } = render(<Modal isOpen onClose={mock(() => {})} onTableCreated={mock(() => {})} />);
     const body = within(baseElement);
 
     // Set table name
@@ -368,15 +332,13 @@ describe("CreateTableModal", () => {
     });
 
     const text = baseElement.textContent || "";
-    expect(text).toContain('"sku" VARCHAR(255) NOT NULL UNIQUE');
+    expect(text).toContain("sku VARCHAR(255) NOT NULL UNIQUE");
   });
 
   // ── 8. DEFAULT value in SQL ────────────────────────────────────────────────
 
   test("DEFAULT value appears in SQL when set", () => {
-    const { baseElement } = render(
-      <CreateTableModal isOpen onClose={mock(() => {})} onTableCreated={mock(() => {})} />,
-    );
+    const { baseElement } = render(<Modal isOpen onClose={mock(() => {})} onTableCreated={mock(() => {})} />);
     const body = within(baseElement);
 
     // Set table name
@@ -404,17 +366,15 @@ describe("CreateTableModal", () => {
     // DEFAULT ("GENERATED BY DEFAULT AS IDENTITY"), so a document-wide check no longer
     // says anything about this column.
     const text = baseElement.textContent || "";
-    expect(text).toContain('"level" VARCHAR(255)');
-    expect(text).not.toContain('"level" VARCHAR(255) DEFAULT');
+    expect(text).toContain("level VARCHAR(255)");
+    expect(text).not.toContain("level VARCHAR(255) DEFAULT");
   });
 
   // ── 9. Validate empty table name -> button disabled ─────────────────────────
 
   test("CREATE TABLE button is disabled when table name is empty", () => {
     const onTableCreated = mock(() => {});
-    const { baseElement } = render(
-      <CreateTableModal isOpen onClose={mock(() => {})} onTableCreated={onTableCreated} />,
-    );
+    const { baseElement } = render(<Modal isOpen onClose={mock(() => {})} onTableCreated={onTableCreated} />);
     const body = within(baseElement);
 
     // Table name is empty by default
@@ -430,11 +390,9 @@ describe("CreateTableModal", () => {
 
   // ── 9b. Validate empty table name -> error toast (guard inside handleCreate) ─
 
-  test("whitespace-only table name remains visible but cannot be created", () => {
+  test("a whitespace-only table name stays as typed and cannot be created", () => {
     const onTableCreated = mock(() => {});
-    const { baseElement } = render(
-      <CreateTableModal isOpen onClose={mock(() => {})} onTableCreated={onTableCreated} />,
-    );
+    const { baseElement } = render(<Modal isOpen onClose={mock(() => {})} onTableCreated={onTableCreated} />);
     const body = within(baseElement);
 
     const createBtn = body.getByText("CREATE TABLE").closest("button") as HTMLButtonElement;
@@ -446,6 +404,7 @@ describe("CreateTableModal", () => {
     });
     expect(tableNameInput.value).toBe("   ");
     expect(createBtn.disabled).toBe(true);
+    expect(baseElement.querySelector("#tableName-error")?.textContent).toBe("Table name is required");
     expect(onTableCreated).not.toHaveBeenCalled();
   });
 
@@ -453,9 +412,7 @@ describe("CreateTableModal", () => {
 
   test("handleCreate shows error toast when a column has empty name", () => {
     const onTableCreated = mock(() => {});
-    const { baseElement } = render(
-      <CreateTableModal isOpen onClose={mock(() => {})} onTableCreated={onTableCreated} />,
-    );
+    const { baseElement } = render(<Modal isOpen onClose={mock(() => {})} onTableCreated={onTableCreated} />);
     const body = within(baseElement);
 
     // Set table name
@@ -484,7 +441,7 @@ describe("CreateTableModal", () => {
   test("handleCreate calls onTableCreated and onClose on success", () => {
     const onTableCreated = mock(() => {});
     const onClose = mock(() => {});
-    const { baseElement } = render(<CreateTableModal isOpen onClose={onClose} onTableCreated={onTableCreated} />);
+    const { baseElement } = render(<Modal isOpen onClose={onClose} onTableCreated={onTableCreated} />);
     const body = within(baseElement);
 
     // Set table name
@@ -502,8 +459,8 @@ describe("CreateTableModal", () => {
     expect(onTableCreated).toHaveBeenCalledTimes(1);
     // Verify the SQL was passed
     const sqlArg = (onTableCreated as ReturnType<typeof mock>).mock.calls[0][0] as string;
-    expect(sqlArg).toContain('CREATE TABLE "customers"');
-    expect(sqlArg).toContain('"id" INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY');
+    expect(sqlArg).toContain("CREATE TABLE customers");
+    expect(sqlArg).toContain("id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY");
 
     expect(onClose).toHaveBeenCalledTimes(1);
   });
@@ -513,7 +470,7 @@ describe("CreateTableModal", () => {
   test("state resets after successful creation", () => {
     const onTableCreated = mock(() => {});
     const onClose = mock(() => {});
-    const { baseElement } = render(<CreateTableModal isOpen onClose={onClose} onTableCreated={onTableCreated} />);
+    const { baseElement } = render(<Modal isOpen onClose={onClose} onTableCreated={onTableCreated} />);
     const body = within(baseElement);
 
     // Set table name and add a column
@@ -551,9 +508,7 @@ describe("CreateTableModal", () => {
   // ── 13. PK checkbox auto-unchecks Nullable ─────────────────────────────────
 
   test("checking PK auto-unchecks Nullable", () => {
-    const { baseElement } = render(
-      <CreateTableModal isOpen onClose={mock(() => {})} onTableCreated={mock(() => {})} />,
-    );
+    const { baseElement } = render(<Modal isOpen onClose={mock(() => {})} onTableCreated={mock(() => {})} />);
     const body = within(baseElement);
 
     // Add a new column (default: isPrimary=false, isNullable=true)
@@ -584,7 +539,7 @@ describe("CreateTableModal", () => {
 
   test("Cancel button calls onClose", () => {
     const onClose = mock(() => {});
-    const { baseElement } = render(<CreateTableModal isOpen onClose={onClose} onTableCreated={mock(() => {})} />);
+    const { baseElement } = render(<Modal isOpen onClose={onClose} onTableCreated={mock(() => {})} />);
     const body = within(baseElement);
 
     const cancelBtn = body.getByText("Cancel");
@@ -598,9 +553,7 @@ describe("CreateTableModal", () => {
   // ── 15. Column type selector changes SQL preview ───────────────────────────
 
   test("default column type VARCHAR(255) appears in SQL for new columns", () => {
-    const { baseElement } = render(
-      <CreateTableModal isOpen onClose={mock(() => {})} onTableCreated={mock(() => {})} />,
-    );
+    const { baseElement } = render(<Modal isOpen onClose={mock(() => {})} onTableCreated={mock(() => {})} />);
     const body = within(baseElement);
 
     // Set table name
@@ -622,10 +575,10 @@ describe("CreateTableModal", () => {
 
     // SQL preview should show the default type
     const text = baseElement.textContent || "";
-    expect(text).toContain('"description" VARCHAR(255)');
+    expect(text).toContain("description VARCHAR(255)");
 
     // Also verify the default id column uses the identity spelling
-    expect(text).toContain('"id" INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY');
+    expect(text).toContain("id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY");
   });
 
   // ── 16. One dialect per engine (#648) ──────────────────────────────────────
@@ -633,7 +586,7 @@ describe("CreateTableModal", () => {
   /** Render for one engine, name the table, and return the SQL the preview shows. */
   function previewFor(dbType: DatabaseType | undefined): string {
     const { baseElement } = render(
-      <CreateTableModal isOpen dbType={dbType} onClose={mock(() => {})} onTableCreated={mock(() => {})} />,
+      <Modal isOpen dbType={dbType} onClose={mock(() => {})} onTableCreated={mock(() => {})} />,
     );
     act(() => {
       fireEvent.change(baseElement.querySelector("#tableName") as HTMLInputElement, {
@@ -649,26 +602,24 @@ describe("CreateTableModal", () => {
    * table read `id SERIAL PRIMARY KEY`, which parses on two of the eight.
    */
   const AUTO_INCREMENT_BY_ENGINE: ReadonlyArray<[DatabaseType, string]> = [
-    ["postgres", '"id" INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY'],
-    ["mysql", "`id` INT AUTO_INCREMENT PRIMARY KEY"],
-    ["mssql", "[id] INT IDENTITY(1,1) PRIMARY KEY"],
-    ["oracle", '"id" NUMBER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY'],
+    ["postgres", "id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY"],
+    ["mysql", "id INT AUTO_INCREMENT PRIMARY KEY"],
+    ["mssql", "id INT IDENTITY(1,1) PRIMARY KEY"],
+    ["oracle", "id NUMBER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY"],
     // AUTOINCREMENT has to follow PRIMARY KEY and the type has to be exactly INTEGER;
     // both were measured on SQLite 3.53.4, where the other orderings are syntax errors.
-    ["sqlite", '"id" INTEGER PRIMARY KEY AUTOINCREMENT'],
-    ["libsql", '"id" INTEGER PRIMARY KEY AUTOINCREMENT'],
-    ["duckdb", '"id" INTEGER PRIMARY KEY DEFAULT nextval(\'"widgets_id_seq"\')'],
+    ["sqlite", "id INTEGER PRIMARY KEY AUTOINCREMENT"],
+    ["libsql", "id INTEGER PRIMARY KEY AUTOINCREMENT"],
+    ["duckdb", "id INTEGER PRIMARY KEY DEFAULT nextval('widgets_id_seq')"],
     // Trino's column grammar is a name, a type and an optional NOT NULL — no generated
     // value, and no PRIMARY KEY to attach one to.
-    ["trino", '"id" INTEGER NOT NULL'],
+    ["trino", "id INTEGER NOT NULL"],
   ];
 
   for (const [dbType, expected] of AUTO_INCREMENT_BY_ENGINE) {
     test(`${dbType}: default id column is that engine's auto-increment key`, () => {
       const sql = previewFor(dbType);
-      const open = dbType === "mysql" ? "`" : dbType === "mssql" ? "[" : '"';
-      const close = dbType === "mssql" ? "]" : open;
-      expect(sql).toContain(`CREATE TABLE ${open}widgets${close} (\n  ${expected}\n);`);
+      expect(sql).toContain(`CREATE TABLE widgets (\n  ${expected}\n);`);
       expect(sql).not.toContain("SERIAL");
     });
   }
@@ -679,13 +630,13 @@ describe("CreateTableModal", () => {
     // "Catalog Error: Sequence with name nope does not exist!", so the order of these two
     // statements is the fix and not a formatting choice. IF NOT EXISTS because the
     // sequence outlives a DROP TABLE and a bare CREATE SEQUENCE would then fail.
-    expect(sql.indexOf('CREATE SEQUENCE IF NOT EXISTS "widgets_id_seq";')).toBe(0);
-    expect(sql.indexOf('CREATE TABLE "widgets"')).toBeGreaterThan(0);
+    expect(sql.indexOf("CREATE SEQUENCE IF NOT EXISTS widgets_id_seq;")).toBe(0);
+    expect(sql.indexOf("CREATE TABLE widgets")).toBeGreaterThan(0);
   });
 
   test("trino hides the options its grammar has no place for", () => {
     const { baseElement } = render(
-      <CreateTableModal isOpen dbType="trino" onClose={mock(() => {})} onTableCreated={mock(() => {})} />,
+      <Modal isOpen dbType="trino" onClose={mock(() => {})} onTableCreated={mock(() => {})} />,
     );
     expect(baseElement.textContent).not.toContain("Auto-Increment");
     // PK and Unq go with it: Trino takes a name, a type and NOT NULL, so those two
@@ -697,7 +648,7 @@ describe("CreateTableModal", () => {
 
   test("every other engine keeps all three column checkboxes", () => {
     const { baseElement } = render(
-      <CreateTableModal isOpen dbType="postgres" onClose={mock(() => {})} onTableCreated={mock(() => {})} />,
+      <Modal isOpen dbType="postgres" onClose={mock(() => {})} onTableCreated={mock(() => {})} />,
     );
     expect(baseElement.querySelectorAll('button[role="checkbox"]').length).toBe(3);
   });
@@ -705,7 +656,7 @@ describe("CreateTableModal", () => {
   /** Open the first column's type dropdown and return the type names it lists. */
   function typeOptionsFor(dbType: DatabaseType): string[] {
     const { baseElement } = render(
-      <CreateTableModal isOpen dbType={dbType} onClose={mock(() => {})} onTableCreated={mock(() => {})} />,
+      <Modal isOpen dbType={dbType} onClose={mock(() => {})} onTableCreated={mock(() => {})} />,
     );
     act(() => {
       fireEvent.keyDown(baseElement.querySelectorAll('[role="combobox"]')[0], { key: "ArrowDown" });
@@ -761,7 +712,7 @@ describe("CreateTableModal", () => {
 
   test("an added column starts on a type the engine has", () => {
     const { baseElement } = render(
-      <CreateTableModal isOpen dbType="sqlite" onClose={mock(() => {})} onTableCreated={mock(() => {})} />,
+      <Modal isOpen dbType="sqlite" onClose={mock(() => {})} onTableCreated={mock(() => {})} />,
     );
     const body = within(baseElement);
     act(() => {
@@ -775,12 +726,12 @@ describe("CreateTableModal", () => {
       fireEvent.change(colInputs[1], { target: { value: "body" } });
     });
     // SQLite's list starts at TEXT; "VARCHAR(255)" is not one of its affinity spellings.
-    expect(baseElement.querySelector("pre")?.textContent).toContain('"body" TEXT');
+    expect(baseElement.querySelector("pre")?.textContent).toContain("body TEXT");
   });
 
   test("no connection yet keeps the PostgreSQL behaviour the form already had", () => {
     // The first render the app produces is `dbType={undefined}`; see the mount-shape tests below.
-    expect(previewFor(undefined)).toContain('"id" INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY');
+    expect(previewFor(undefined)).toContain("id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY");
   });
 
   test("opening it for an engine without create-table support throws instead of writing PostgreSQL DDL", () => {
@@ -802,7 +753,7 @@ describe("CreateTableModal", () => {
   test("closed, it stays mounted for an engine without create-table support and renders nothing", () => {
     // `StudioOverlays` mounts this modal for every connection, so the refusal is on OPEN only.
     const { baseElement } = render(
-      <CreateTableModal isOpen={false} dbType="db2" onClose={mock(() => {})} onTableCreated={mock(() => {})} />,
+      <Modal isOpen={false} dbType="db2" onClose={mock(() => {})} onTableCreated={mock(() => {})} />,
     );
     expect(baseElement.textContent).not.toContain("Create New Table");
   });
@@ -811,16 +762,16 @@ describe("CreateTableModal", () => {
     // The modal stays mounted across a connection switch, so a column picked on
     // PostgreSQL can be rendered for Trino, which has no auto-increment clause to use.
     const { baseElement, rerender } = render(
-      <CreateTableModal isOpen dbType="postgres" onClose={mock(() => {})} onTableCreated={mock(() => {})} />,
+      <Modal isOpen dbType="postgres" onClose={mock(() => {})} onTableCreated={mock(() => {})} />,
     );
     act(() => {
       fireEvent.change(baseElement.querySelector("#tableName") as HTMLInputElement, {
         target: { value: "widgets" },
       });
     });
-    rerender(<CreateTableModal isOpen dbType="trino" onClose={mock(() => {})} onTableCreated={mock(() => {})} />);
+    rerender(<Modal isOpen dbType="trino" onClose={mock(() => {})} onTableCreated={mock(() => {})} />);
     const sql = baseElement.querySelector("pre")?.textContent || "";
-    expect(sql).toContain('"id" INTEGER NOT NULL');
+    expect(sql).toContain("id INTEGER NOT NULL");
     expect(sql).not.toContain("__auto_increment__");
   });
 
@@ -834,8 +785,8 @@ describe("CreateTableModal", () => {
    */
   function mountThenConnect(dbType: DatabaseType) {
     const props = { isOpen: true as const, onClose: mock(() => {}), onTableCreated: mock(() => {}) };
-    const view = render(<CreateTableModal {...props} />);
-    view.rerender(<CreateTableModal {...props} dbType={dbType} />);
+    const view = render(<Modal {...props} />);
+    view.rerender(<Modal {...props} dbType={dbType} />);
     return view;
   }
 
@@ -849,13 +800,13 @@ describe("CreateTableModal", () => {
         target: { value: "widgets" },
       });
     });
-    expect(baseElement.querySelector("pre")?.textContent).toContain('"id" INTEGER NOT NULL');
+    expect(baseElement.querySelector("pre")?.textContent).toContain("id INTEGER NOT NULL");
   });
 
   test("a create on one engine does not fix the form's columns to it", () => {
     const props = { isOpen: true as const, onClose: mock(() => {}), onTableCreated: mock(() => {}) };
-    const { baseElement, rerender } = render(<CreateTableModal {...props} />);
-    rerender(<CreateTableModal {...props} dbType="trino" />);
+    const { baseElement, rerender } = render(<Modal {...props} />);
+    rerender(<Modal {...props} dbType="trino" />);
     act(() => {
       fireEvent.change(baseElement.querySelector("#tableName") as HTMLInputElement, {
         target: { value: "widgets" },
@@ -868,19 +819,19 @@ describe("CreateTableModal", () => {
     // Switching to SQLite has to bring SQLite's default key back. Carrying Trino's plain
     // `id INTEGER NOT NULL` over is the silently-broken key this PR set out to close,
     // arriving through the reset instead of through the dialect table.
-    rerender(<CreateTableModal {...props} dbType="sqlite" />);
+    rerender(<Modal {...props} dbType="sqlite" />);
     act(() => {
       fireEvent.change(baseElement.querySelector("#tableName") as HTMLInputElement, {
         target: { value: "notes" },
       });
     });
-    expect(baseElement.querySelector("pre")?.textContent).toContain('"id" INTEGER PRIMARY KEY AUTOINCREMENT');
+    expect(baseElement.querySelector("pre")?.textContent).toContain("id INTEGER PRIMARY KEY AUTOINCREMENT");
   });
 
   test("a type chosen on one engine does not survive into the next", () => {
     // JSONB is a PostgreSQL spelling; SQLite takes it silently on NUMERIC affinity.
     const props = { isOpen: true as const, onClose: mock(() => {}), onTableCreated: mock(() => {}) };
-    const { baseElement, rerender } = render(<CreateTableModal {...props} dbType="postgres" />);
+    const { baseElement, rerender } = render(<Modal {...props} dbType="postgres" />);
     const body = within(baseElement);
     act(() => {
       fireEvent.change(baseElement.querySelector("#tableName") as HTMLInputElement, {
@@ -901,9 +852,9 @@ describe("CreateTableModal", () => {
         Array.from(baseElement.querySelectorAll('[role="option"]')).find((o) => o.textContent === "JSONB") as Element,
       );
     });
-    expect(baseElement.querySelector("pre")?.textContent).toContain('"payload" JSONB');
+    expect(baseElement.querySelector("pre")?.textContent).toContain("payload JSONB");
 
-    rerender(<CreateTableModal {...props} dbType="sqlite" />);
+    rerender(<Modal {...props} dbType="sqlite" />);
     act(() => {
       fireEvent.change(baseElement.querySelector("#tableName") as HTMLInputElement, {
         target: { value: "notes" },
@@ -911,14 +862,14 @@ describe("CreateTableModal", () => {
     });
     const sql = baseElement.querySelector("pre")?.textContent || "";
     expect(sql).not.toContain("JSONB");
-    expect(sql).toContain('"id" INTEGER PRIMARY KEY AUTOINCREMENT');
+    expect(sql).toContain("id INTEGER PRIMARY KEY AUTOINCREMENT");
   });
 
   // ── 18. Unchecking PK on an auto-increment column ──────────────────────────
 
   test("unchecking PK takes the auto-increment column off the key", () => {
     const { baseElement } = render(
-      <CreateTableModal isOpen dbType="postgres" onClose={mock(() => {})} onTableCreated={mock(() => {})} />,
+      <Modal isOpen dbType="postgres" onClose={mock(() => {})} onTableCreated={mock(() => {})} />,
     );
     act(() => {
       fireEvent.change(baseElement.querySelector("#tableName") as HTMLInputElement, {
@@ -926,7 +877,7 @@ describe("CreateTableModal", () => {
       });
     });
     expect(baseElement.querySelector("pre")?.textContent).toContain(
-      '"id" INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY',
+      "id INTEGER GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY",
     );
 
     // Row 0: PK=checkboxes[0], Null=checkboxes[1], Unq=checkboxes[2]
@@ -939,7 +890,7 @@ describe("CreateTableModal", () => {
     // would read "".
     const sql = baseElement.querySelector("pre")?.textContent || "";
     expect(sql).not.toContain("PRIMARY KEY");
-    expect(sql).toContain('"id" INTEGER NOT NULL UNIQUE');
+    expect(sql).toContain("id INTEGER NOT NULL UNIQUE");
     expect(baseElement.querySelectorAll('[role="combobox"]')[0].textContent).toBe("INTEGER");
   });
 
@@ -953,7 +904,7 @@ describe("CreateTableModal", () => {
       ["duckdb", "INTEGER"],
     ] as Array<[DatabaseType, string]>) {
       const { baseElement } = render(
-        <CreateTableModal isOpen dbType={dbType} onClose={mock(() => {})} onTableCreated={mock(() => {})} />,
+        <Modal isOpen dbType={dbType} onClose={mock(() => {})} onTableCreated={mock(() => {})} />,
       );
       act(() => {
         fireEvent.click(baseElement.querySelectorAll('button[role="checkbox"]')[0]);
@@ -973,7 +924,7 @@ describe("CreateTableModal", () => {
     name = "ct_other",
   ): { sql: string; text: string } {
     const { baseElement } = render(
-      <CreateTableModal
+      <Modal
         isOpen
         dbType={dbType}
         container={container}
@@ -993,67 +944,65 @@ describe("CreateTableModal", () => {
     return result;
   }
 
-  const MYSQL_CAPS = { queryLanguage: "sql", defaultPort: 3306 } as unknown as ProviderCapabilities;
-  const PG_CAPS = { queryLanguage: "sql", defaultPort: 5432 } as unknown as ProviderCapabilities;
+  const MYSQL_CAPS = CAPS.mysql;
+  const PG_CAPS = CAPS.postgres;
 
   test("a table asked for in a container is created in it, and the header says where (#1391)", () => {
     // Measured on MySQL 26.7.0: Create Table under `e2e_other` used to create `e2e.ct_other`.
     const { sql, text } = previewIn("mysql", ["e2e_other"], MYSQL_CAPS);
-    expect(sql).toContain("CREATE TABLE e2e_other.`ct_other` (");
+    expect(sql).toContain("CREATE TABLE e2e_other.ct_other (");
     expect(text).toContain("In e2e_other");
     expect(text).not.toContain("Define schema structure");
   });
 
   test("each segment is quoted in the connection's own dialect (#1391)", () => {
-    expect(previewIn("mysql", ["e2e-other"], MYSQL_CAPS).sql).toContain("CREATE TABLE `e2e-other`.`ct_other` (");
-    expect(previewIn("postgres", ["Sales"], PG_CAPS).sql).toContain('CREATE TABLE "Sales"."ct_other" (');
+    expect(previewIn("mysql", ["e2e-other"], MYSQL_CAPS).sql).toContain("CREATE TABLE `e2e-other`.ct_other (");
+    expect(previewIn("postgres", ["Sales"], PG_CAPS).sql).toContain('CREATE TABLE "Sales".ct_other (');
   });
 
-  test("the typed table name is quoted without changing its case in a container (#1435)", () => {
-    // Oracle folds an unquoted name to upper case; quoting preserves the user's lowercase name.
-    const ORACLE_CAPS = { queryLanguage: "sql", defaultPort: 1521 } as unknown as ProviderCapabilities;
-    expect(previewIn("oracle", ["APP"], ORACLE_CAPS, "orders").sql).toContain('CREATE TABLE APP."orders" (');
-    expect(previewIn("postgres", ["MySchema"], PG_CAPS, "orders").sql).toContain('CREATE TABLE "MySchema"."orders" (');
+  test("the typed name is written as the flat button writes it, inside the quoted container (#1391, #1435)", () => {
+    // Oracle folds an unquoted name to upper case, so force-quoting the typed `orders` would create a
+    // lowercase table that a later `SELECT * FROM orders` cannot find (ORA-00942).
+    expect(previewIn("oracle", ["APP"], CAPS.oracle, "orders").sql).toContain("CREATE TABLE APP.orders (");
+    // A mixed-case PostgreSQL schema keeps its case through quoting; the table name stays as typed.
+    expect(previewIn("postgres", ["MySchema"], PG_CAPS, "orders").sql).toContain('CREATE TABLE "MySchema".orders (');
+    // A name outside the bare subset is quoted exactly, in the container as on the flat button.
+    expect(previewIn("oracle", ["APP"], CAPS.oracle, "Ürün").sql).toContain('CREATE TABLE APP."Ürün" (');
   });
 
   test("DuckDB's sequence is created beside the table it numbers (#1391)", () => {
-    const { sql } = previewIn("duckdb", ["main"], PG_CAPS, "widgets");
-    expect(sql).toContain('CREATE SEQUENCE IF NOT EXISTS main."widgets_id_seq";');
-    expect(sql).toContain("DEFAULT nextval('main.\"widgets_id_seq\"')");
-    expect(sql).toContain('CREATE TABLE main."widgets" (');
+    const { sql } = previewIn("duckdb", ["main"], CAPS.duckdb, "widgets");
+    expect(sql).toContain("CREATE SEQUENCE IF NOT EXISTS main.widgets_id_seq;");
+    expect(sql).toContain("DEFAULT nextval('main.widgets_id_seq')");
+    expect(sql).toContain("CREATE TABLE main.widgets (");
   });
 
-  test("a quote inside the sequence's name stays inside its string literal (#1391)", () => {
-    const { sql } = previewIn("duckdb", ["it's"], PG_CAPS, "widgets");
-    expect(sql).toContain(`DEFAULT nextval('"it''s"."widgets_id_seq"')`);
-  });
-
-  test("DuckDB executes a generated sequence name with quotes and apostrophes", async () => {
-    const { baseElement } = render(
-      <CreateTableModal isOpen dbType="duckdb" onClose={mock(() => {})} onTableCreated={mock(() => {})} />,
+  test("a quote inside the sequence's name stays inside its string literal (#1391, #1435)", () => {
+    expect(previewIn("duckdb", ["it's"], CAPS.duckdb, "widgets").sql).toContain(
+      `DEFAULT nextval('"it''s".widgets_id_seq')`,
     );
-    act(() => {
-      fireEvent.change(baseElement.querySelector("#tableName") as HTMLInputElement, {
-        target: { value: `Kid's "Table"` },
-      });
-      fireEvent.change(baseElement.querySelector('input[placeholder="column_name"]') as HTMLInputElement, {
-        target: { value: `id's "count"` },
-      });
-    });
-    const sql = baseElement.querySelector("pre")?.textContent || "";
-    const [createSequence, createTable] = sql.split(";\n");
-    expect(createSequence).toMatch(/^CREATE SEQUENCE IF NOT EXISTS "libredb\$[0-9a-f]+_seq"$/);
-    const sequenceName = createSequence.slice("CREATE SEQUENCE IF NOT EXISTS ".length);
-    expect(createTable).toContain(`DEFAULT nextval('${sequenceName}')`);
+    expect(previewIn("duckdb", [], CAPS.duckdb, "Kid's Table").sql).toContain(
+      `CREATE SEQUENCE IF NOT EXISTS "Kid's Table_id_seq";`,
+    );
+    expect(previewIn("duckdb", [], CAPS.duckdb, "Kid's Table").sql).toContain(
+      `DEFAULT nextval('"Kid''s Table_id_seq"')`,
+    );
+  });
+
+  test("DuckDB runs the generated statements for a typed name with an apostrophe and non-ASCII letters (#1435)", async () => {
+    const { sql } = typeNames("duckdb", "Ürün's Tablo", "başlık");
+    const [createSequence, createTable, ...rest] = sql.split(";\n");
+    expect(rest).toEqual([]);
 
     const { DuckDBInstance } = await import("@duckdb/node-api");
     const instance = await DuckDBInstance.create(":memory:");
     const connection = await instance.connect();
     try {
+      // The sequence first: the table's default reads it.
       await connection.run(createSequence);
       await connection.run(createTable);
-      await connection.run('INSERT INTO "Kid\'s ""Table""" DEFAULT VALUES');
-      const rows = await connection.runAndReadAll('SELECT "id\'s ""count""" AS value FROM "Kid\'s ""Table"""');
+      await connection.run(`INSERT INTO "Ürün's Tablo" DEFAULT VALUES`);
+      const rows = await connection.runAndReadAll(`SELECT "başlık" AS value FROM "Ürün's Tablo"`);
       expect(rows.getRowObjectsJson()).toEqual([{ value: 1 }]);
     } finally {
       connection.disconnectSync();
@@ -1061,10 +1010,34 @@ describe("CreateTableModal", () => {
     }
   });
 
-  test("no container, or no capabilities to quote it with, keeps the table unqualified (#1391)", () => {
+  test("no container keeps the bare name (#1391)", () => {
     const bare = previewIn("mysql", [], MYSQL_CAPS);
-    expect(bare.sql).toContain("CREATE TABLE `ct_other` (");
+    expect(bare.sql).toContain("CREATE TABLE ct_other (");
     expect(bare.text).toContain("Define schema structure");
-    expect(previewIn("mysql", ["e2e_other"], undefined).sql).toContain("CREATE TABLE `ct_other` (");
+  });
+
+  test("opening it without the connection's capabilities throws: it cannot quote a name without them", () => {
+    const consoleError = console.error;
+    console.error = () => {};
+    try {
+      expect(() => previewIn("mysql", ["e2e_other"], undefined)).toThrow(
+        'CreateTableModal: opened without the capabilities of the "mysql" connection',
+      );
+    } finally {
+      console.error = consoleError;
+    }
+  });
+
+  test("closed, it stays mounted without capabilities and renders nothing", () => {
+    const { baseElement } = render(
+      <Modal
+        isOpen={false}
+        dbType="mysql"
+        capabilities={undefined}
+        onClose={mock(() => {})}
+        onTableCreated={mock(() => {})}
+      />,
+    );
+    expect(baseElement.textContent).not.toContain("Create New Table");
   });
 });
