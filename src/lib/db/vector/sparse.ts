@@ -95,11 +95,18 @@ export function sparseFromCell(cell: unknown, encoding: SparseEncoding): SparseV
   if (cell === null || typeof cell !== "object" || Array.isArray(cell)) return null;
   if (encoding === "index-map") {
     const entries = Object.entries(cell as Record<string, unknown>);
-    if (!entries.every(([key, value]) => CANONICAL_INDEX.test(key) && typeof value === "number")) return null;
-    return sorted(
-      entries.map(([key]) => Number(key)),
-      entries.map(([, value]) => value as number),
-    );
+    const indices: number[] = [];
+    const values: number[] = [];
+    let ascending = true;
+    for (const [key, value] of entries) {
+      if (!CANONICAL_INDEX.test(key) || typeof value !== "number") return null;
+      const index = Number(key);
+      if (indices.length > 0 && index < indices[indices.length - 1]) ascending = false;
+      indices.push(index);
+      values.push(value);
+    }
+    if (!ascending) return sorted(indices, values);
+    return Object.freeze({ indices: Object.freeze(indices), values: Object.freeze(values) });
   }
   const { indices, values } = cell as { indices?: unknown; values?: unknown };
   if (!Array.isArray(indices) || !Array.isArray(values) || indices.length !== values.length) return null;

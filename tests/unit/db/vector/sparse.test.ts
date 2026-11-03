@@ -131,6 +131,14 @@ describe("sparseFromCell", () => {
       expect(sparseFromCell(cell, encoding), JSON.stringify(cell)).toBeNull();
     }
   });
+
+  test("sorts large decimal keys that JavaScript does not enumerate in numeric order", () => {
+    const vector = sparseFromCell({ "4294967297": 1, "4294967296": 2 }, "index-map");
+    expect(vector).toEqual({ indices: [4294967296, 4294967297], values: [2, 1] });
+    expect(Object.isFrozen(vector)).toBe(true);
+    expect(Object.isFrozen(vector?.indices)).toBe(true);
+    expect(Object.isFrozen(vector?.values)).toBe(true);
+  });
 });
 
 describe("both engines' sparse cells", () => {
