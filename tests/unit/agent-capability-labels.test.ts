@@ -21,4 +21,22 @@ describe("agent capability labels", () => {
       expect(isAgentModelCapability(value)).toBe(false);
     }
   });
+
+  test("accepts each capability the server can report", () => {
+    for (const value of ["toolCalling", "structuredOutput", "streaming"]) {
+      expect(isAgentModelCapability(value)).toBe(true);
+    }
+  });
+
+  test("requires the exact capability name", () => {
+    for (const value of ["ToolCalling", "toolcalling", " toolCalling", "toolCalling ", ""]) {
+      expect(isAgentModelCapability(value)).toBe(false);
+    }
+  });
+
+  test("rejects non-string values even when they resemble a capability name", () => {
+    for (const value of [new String("toolCalling"), ["toolCalling"], { toString: () => "toolCalling" }]) {
+      expect(isAgentModelCapability(value)).toBe(false);
+    }
+  });
 });
